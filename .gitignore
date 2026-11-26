@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+.env
+*.aof
+*.fdb
+dump.fdb
+appendonly.aof*
+.terraform/
+.DS_Store
+fuzz/target

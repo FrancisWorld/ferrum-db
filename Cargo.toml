@@ -1,0 +1,58 @@
+[package]
+name = "ferrum-db"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "An in-memory data store speaking RESP2/RESP3, written in Rust on Tokio"
+license = "MIT"
+repository = "https://github.com/FrancisWorld/ferrum-db"
+readme = "README.md"
+keywords = ["database", "resp", "in-memory", "tokio"]
+categories = ["database-implementations"]
+
+[dependencies]
+ahash = "0.8.14"
+bytes = "1.12.2"
+clap = { version = "4.6.10", features = ["derive", "env"] }
+crc32fast = "1.5.6"
+fastrand = "2.5.0"
+indexmap = "2.14.2"
+memchr = "2.8.3"
+parking_lot = "0.13.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "signal", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+proptest = "1.12.0"
+tempfile = "3.27.0"
+
+[[bin]]
+name = "ferrum-db"
+path = "src/main.rs"
+
+[[bin]]
+name = "ferrum-load"
+path = "src/bin/ferrum-load.rs"
+
+[[bench]]
+name = "parser"
+harness = false
+
+[[bench]]
+name = "store"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"
