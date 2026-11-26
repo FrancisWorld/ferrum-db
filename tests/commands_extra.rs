@@ -311,6 +311,40 @@ async fn key_commands_extras() {
     assert_eq!(c.cmd(&["KEYS", "*"]).await, Frame::Array(vec![]));
 }
 
+/// Keys that exist for the whole iteration must be returned even while other keys are
+/// being deleted between pages (deletions move slots around inside a shard).
+#[tokio::test]
+async fn scan_never_misses_a_key_that_survives_concurrent_deletions() {
+    let srv = TestServer::start_with(|c| c.shards = 4).await;
+    let mut c = srv.client().await;
+    for i in 0..300 {
+        c.cmd(&["SET", &format!("keep:{i}"), "v"]).await;
+        c.cmd(&["SET", &format!("temp:{i}"), "v"]).await;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = "0".to_string();
+    let mut next_temp = 0;
+    loop {
+        let Frame::Array(reply) = c.cmd(&["SCAN", &cursor, "COUNT", "7"]).await else {
+            panic!()
+        };
+        seen.extend(strings(reply[1].clone()));
+        cursor = strings(Frame::Array(vec![reply[0].clone()])).remove(0);
+        for _ in 0..3 {
+            if next_temp < 300 {
+                c.cmd(&["DEL", &format!("temp:{next_temp}")]).await;
+                next_temp += 1;
+            }
+        }
+        if cursor == "0" {
+            break;
+        }
+    }
+    for i in 0..300 {
+        assert!(seen.contains(&format!("keep:{i}")), "keep:{i} was missed");
+    }
+}
+
 #[tokio::test]
 async fn list_extras() {
     let srv = TestServer::start().await;
