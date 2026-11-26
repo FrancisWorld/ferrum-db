@@ -106,7 +106,7 @@ All flags can also be set through `FERRUM_*` environment variables (see `ferrum-
 
 ### A real session
 
-Output of `redis-cli` from the `redis:7-alpine` image against the compose service:
+Output of `redis-cli` from the `redis:7-alpine` image against the compose service (recorded before a password became mandatory; today, authenticate first with `-a "$FERRUM_REQUIREPASS"` or `export REDISCLI_AUTH="$FERRUM_REQUIREPASS"`):
 
 ```text
 $ redis-cli -h ferrum -p 6380 SET greeting "hello ferrum"

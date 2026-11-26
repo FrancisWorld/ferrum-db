@@ -107,7 +107,7 @@ Todas as opções também podem vir de variáveis `FERRUM_*` (veja `ferrum-db --
 
 ### Uma sessão real
 
-Saída do `redis-cli` da imagem `redis:7-alpine` contra o serviço do compose:
+Saída do `redis-cli` da imagem `redis:7-alpine` contra o serviço do compose (gravada antes de a senha virar obrigatória; hoje, autentique antes com `-a "$FERRUM_REQUIREPASS"` ou `export REDISCLI_AUTH="$FERRUM_REQUIREPASS"`):
 
 ```text
 $ redis-cli -h ferrum -p 6380 SET greeting "hello ferrum"
