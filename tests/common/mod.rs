@@ -141,6 +141,11 @@ impl Client {
         self.stream.write_all(data).await.expect("write");
     }
 
+    /// Like `send_raw` but reports a closed connection instead of panicking.
+    pub async fn try_send_raw(&mut self, data: &[u8]) -> bool {
+        self.stream.write_all(data).await.is_ok()
+    }
+
     /// Reads the next frame; `None` on EOF or after `timeout`.
     pub async fn try_read(&mut self, timeout: Duration) -> Option<Frame> {
         tokio::time::timeout(timeout, async {
@@ -215,6 +220,7 @@ pub fn bytes(s: &str) -> Bytes {
 /// A real `ferrum-db` process, for tests that must survive or cause a crash.
 pub struct Proc {
     child: Child,
+    announced: std::sync::mpsc::Receiver<SocketAddr>,
     pub addr: SocketAddr,
 }
 
@@ -223,39 +229,62 @@ impl Proc {
         Self::spawn_env(dir, extra, &[])
     }
 
+    /// Starts the binary on an OS-assigned port (`--port 0`) and learns the real address
+    /// from its "ready" log line, so parallel tests can never race for the same port.
     pub fn spawn_env(dir: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Proc {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let child = Command::new(env!("CARGO_BIN_EXE_ferrum-db"))
-            .args(["--port", &port.to_string(), "--dir"])
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ferrum-db"))
+            .args(["--port", "0", "--dir"])
             .arg(dir)
             .args(extra)
             .envs(envs.iter().copied())
+            .env("NO_COLOR", "1")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn ferrum-db");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let (tx, announced) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if let Some(at) = line.find("addr=")
+                    && let Ok(addr) = line[at + 5..].trim().parse()
+                {
+                    let _ = tx.send(addr);
+                }
+            }
+        });
         Proc {
             child,
-            addr: SocketAddr::from(([127, 0, 0, 1], port)),
+            announced,
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         }
     }
 
     pub async fn ready(&mut self) -> Client {
-        for _ in 0..200 {
+        for _ in 0..400 {
             if let Some(status) = self.child.try_wait().unwrap() {
                 panic!("server exited early: {status}");
             }
-            if let Ok(stream) = tokio::net::TcpStream::connect(self.addr).await {
-                drop(stream);
+            if let Ok(addr) = self.announced.try_recv() {
+                self.addr = SocketAddr::from(([127, 0, 0, 1], addr.port()));
                 return Client::connect(self.addr).await;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("server did not become ready");
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Opens a client connection to this process.
+    pub async fn client(&self) -> Client {
+        Client::connect(self.addr).await
     }
 
     /// Sends SIGTERM through the `kill` utility (the exact child PID only).

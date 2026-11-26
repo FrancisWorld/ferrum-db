@@ -36,6 +36,8 @@ pub struct Config {
     pub pubsub_buffer_limit: usize,
     /// Largest accepted bulk string.
     pub max_bulk_len: usize,
+    /// Most bytes buffered for one connection's unparsed input.
+    pub max_query_buffer: usize,
     /// Active-expiry cycles per second.
     pub hz: u32,
 }
@@ -56,13 +58,45 @@ impl Default for Config {
             requirepass: None,
             max_clients: 10_000,
             pubsub_buffer_limit: 8 * 1024 * 1024,
-            max_bulk_len: 512 * 1024 * 1024,
+            max_bulk_len: 64 * 1024 * 1024,
+            max_query_buffer: 128 * 1024 * 1024,
             hz: 10,
         }
     }
 }
 
+/// How exposed a configuration is to the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exposure {
+    /// Loopback only, or password protected.
+    Safe,
+    /// Reachable from the network without a password, explicitly allowed by the operator.
+    OpenByRequest,
+}
+
 impl Config {
+    /// Refuses to serve a non-loopback address without a password unless the operator
+    /// explicitly opted in (`--unsafe-no-auth`).
+    pub fn check_exposure(&self, allow_no_auth: bool) -> Result<Exposure, String> {
+        let loopback = self.bind.eq_ignore_ascii_case("localhost")
+            || self
+                .bind
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        if loopback || self.requirepass.is_some() {
+            return Ok(Exposure::Safe);
+        }
+        if allow_no_auth {
+            return Ok(Exposure::OpenByRequest);
+        }
+        Err(format!(
+            "refusing to listen on {} without a password: anyone who can reach the port could read and \
+             change all data. Set --requirepass / FERRUM_REQUIREPASS, bind to 127.0.0.1, or pass \
+             --unsafe-no-auth (FERRUM_ALLOW_NO_AUTH=1) if you really want an open server",
+            self.bind
+        ))
+    }
+
     /// Full path of the AOF.
     pub fn aof_path(&self) -> PathBuf {
         self.dir.join(&self.aof_filename)
@@ -93,7 +127,39 @@ pub fn parse_bytes(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_bytes;
+    use super::{Config, Exposure, parse_bytes};
+
+    fn cfg(bind: &str, pass: Option<&str>) -> Config {
+        Config {
+            bind: bind.into(),
+            requirepass: pass.map(Into::into),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn exposure_rules() {
+        for loopback in ["127.0.0.1", "::1", "localhost", "127.1.2.3"] {
+            assert_eq!(
+                cfg(loopback, None).check_exposure(false),
+                Ok(Exposure::Safe),
+                "{loopback}"
+            );
+        }
+        for open in ["0.0.0.0", "::", "192.168.1.5", "example.internal", ""] {
+            assert!(cfg(open, None).check_exposure(false).is_err(), "{open}");
+            assert_eq!(
+                cfg(open, None).check_exposure(true),
+                Ok(Exposure::OpenByRequest),
+                "{open}"
+            );
+            assert_eq!(
+                cfg(open, Some("pw")).check_exposure(false),
+                Ok(Exposure::Safe),
+                "{open}"
+            );
+        }
+    }
 
     #[test]
     fn byte_sizes() {

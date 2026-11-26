@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ferrum_db::clock::SystemClock;
-use ferrum_db::config::parse_bytes;
+use ferrum_db::config::{Exposure, parse_bytes};
 use ferrum_db::db::EvictionPolicy;
 use ferrum_db::persist::aof::FsyncPolicy;
 use ferrum_db::{Config, Engine, Server};
@@ -43,6 +43,19 @@ struct Args {
     /// Require clients to AUTH with this password.
     #[arg(long, env = "FERRUM_REQUIREPASS", hide_env_values = true)]
     requirepass: Option<String>,
+    /// Allow listening on a non-loopback address without a password (dangerous).
+    #[arg(
+        long = "unsafe-no-auth",
+        env = "FERRUM_ALLOW_NO_AUTH",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    unsafe_no_auth: bool,
+    /// Largest accepted bulk string.
+    #[arg(long, env = "FERRUM_MAX_BULK_LEN", default_value = "64mb", value_parser = parse_size)]
+    max_bulk_len: usize,
+    /// Bytes of unparsed input buffered per connection before it is dropped.
+    #[arg(long, env = "FERRUM_MAX_QUERY_BUFFER", default_value = "128mb", value_parser = parse_size)]
+    max_query_buffer: usize,
     /// Maximum simultaneous clients.
     #[arg(long, env = "FERRUM_MAXCLIENTS", default_value_t = 10_000)]
     max_clients: usize,
@@ -105,9 +118,22 @@ async fn main() -> ExitCode {
         // An empty variable (as docker-compose passes for an unset value) means "no password".
         requirepass: args.requirepass.filter(|p| !p.is_empty()),
         max_clients: args.max_clients,
+        max_query_buffer: args.max_query_buffer,
+        max_bulk_len: args.max_bulk_len,
         pubsub_buffer_limit: args.pubsub_buffer_limit,
         ..Config::default()
     };
+    match config.check_exposure(args.unsafe_no_auth) {
+        Ok(Exposure::Safe) => {}
+        Ok(Exposure::OpenByRequest) => tracing::warn!(
+            bind = %config.bind,
+            "RUNNING WITHOUT A PASSWORD ON A NETWORK ADDRESS (--unsafe-no-auth): anyone who can reach this port has full access"
+        ),
+        Err(msg) => {
+            tracing::error!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    }
     let engine = match Engine::open(config, Arc::new(SystemClock)) {
         Ok(engine) => engine,
         Err(e) => {
