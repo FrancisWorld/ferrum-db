@@ -46,7 +46,9 @@ async fn noeviction_rejects_writes_but_still_serves_reads_and_deletes() {
         b(&value),
         "reads keep working"
     );
-    assert!(matches!(c.cmd(&["LPUSH", "l", "x"]).await, Frame::Error(e) if e.starts_with("OOM")));
+    assert!(
+        matches!(c.cmd(&["LPUSH", "l", &"x".repeat(4096)]).await, Frame::Error(e) if e.starts_with("OOM"))
+    );
     assert_eq!(
         c.cmd(&["DEL", "key:0", "key:1", "key:2", "key:3"]).await,
         int(4),
@@ -195,4 +197,97 @@ async fn memory_accounting_returns_to_baseline_after_deleting_everything() {
         baseline
     );
     assert_eq!(c.cmd(&["DBSIZE"]).await, int(0));
+}
+
+const LIMIT: usize = 64 * 1024;
+
+fn used(srv: &TestServer) -> usize {
+    srv.engine.db().used_memory()
+}
+
+/// maxmemory is enforced against the command's own size, not only the state before it:
+/// a multi-key write that cannot fit is refused whole instead of overshooting.
+#[tokio::test]
+async fn mset_cannot_overshoot_maxmemory() {
+    let srv = TestServer::start_with(|c| c.maxmemory = LIMIT).await;
+    let mut c = srv.client().await;
+    let chunk = "v".repeat(10_000);
+    let mut refused = false;
+    for i in 0..100 {
+        let (a, b, d) = (format!("a{i}"), format!("b{i}"), format!("c{i}"));
+        let reply = c.cmd(&["MSET", &a, &chunk, &b, &chunk, &d, &chunk]).await;
+        assert!(
+            used(&srv) <= LIMIT,
+            "used {} exceeded the limit after write {i}",
+            used(&srv)
+        );
+        if matches!(&reply, Frame::Error(e) if e.starts_with("OOM")) {
+            refused = true;
+            // Nothing from the refused MSET may be applied.
+            assert_eq!(c.cmd(&["EXISTS", &a, &b, &d]).await, int(0));
+            break;
+        }
+        assert_eq!(reply, ok());
+    }
+    assert!(
+        refused,
+        "a 30 KB MSET must eventually be refused under a 64 KB limit"
+    );
+}
+
+#[tokio::test]
+async fn exec_cannot_overshoot_maxmemory() {
+    let srv = TestServer::start_with(|c| c.maxmemory = LIMIT).await;
+    let mut c = srv.client().await;
+    let chunk = "v".repeat(5_000);
+    c.cmd(&["MULTI"]).await;
+    for i in 0..30 {
+        c.cmd(&["SET", &format!("k{i}"), &chunk]).await; // 150 KB queued
+    }
+    assert!(matches!(c.cmd(&["EXEC"]).await, Frame::Error(e) if e.starts_with("OOM")));
+    assert!(used(&srv) <= LIMIT);
+    assert_eq!(
+        c.cmd(&["DBSIZE"]).await,
+        int(0),
+        "an OOM-rejected transaction applies nothing"
+    );
+    // The connection and its watches are usable afterwards.
+    assert_eq!(c.cmd(&["SET", "small", "x"]).await, ok());
+}
+
+#[tokio::test]
+async fn oversized_request_is_refused_without_evicting_everything() {
+    let srv = TestServer::start_with(|c| {
+        c.maxmemory = LIMIT;
+        c.maxmemory_policy = ferrum_db::db::EvictionPolicy::AllKeysLru;
+    })
+    .await;
+    let mut c = srv.client().await;
+    for i in 0..20 {
+        c.cmd(&["SET", &format!("k{i}"), "v"]).await;
+    }
+    let huge = "v".repeat(LIMIT + 1);
+    assert!(matches!(c.cmd(&["SET", "big", &huge]).await, Frame::Error(e) if e.starts_with("OOM")));
+    assert_eq!(
+        c.cmd(&["DBSIZE"]).await,
+        int(20),
+        "a request that can never fit must not wipe the dataset"
+    );
+
+    // A request that fits only after eviction succeeds and stays under the limit.
+    let big = "v".repeat(LIMIT / 2);
+    for i in 0..10 {
+        assert_eq!(
+            c.cmd(&[
+                "MSET",
+                &format!("m{i}"),
+                &big,
+                &format!("n{i}"),
+                &"w".repeat(100)
+            ])
+            .await,
+            ok()
+        );
+        assert!(used(&srv) <= LIMIT, "used {} after write {i}", used(&srv));
+    }
 }

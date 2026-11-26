@@ -52,6 +52,19 @@ pub struct Engine {
     loaded: LoadReport,
 }
 
+/// Conservative upper bound on how much a memory-growing command can add, derived
+/// from its arguments: every argument could be a key (one entry header) and costs its
+/// own bytes, which also covers hash fields and sorted-set members.
+///
+/// It does not bound commands whose result is larger than their arguments
+/// (`SUNIONSTORE` and friends), which can still overshoot `maxmemory`.
+fn growth_estimate(args: &[Bytes]) -> usize {
+    args[1..].iter().fold(0usize, |sum, a| {
+        sum.saturating_add(a.len())
+            .saturating_add(crate::db::ENTRY_OVERHEAD)
+    })
+}
+
 fn policy_code(p: EvictionPolicy) -> u8 {
     match p {
         EvictionPolicy::NoEviction => 0,
@@ -193,14 +206,18 @@ impl Engine {
         }
     }
 
-    /// Evicts until under `maxmemory`, or fails with `OOM` when that is impossible.
-    pub(crate) fn reclaim_memory(&self) -> Result<(), CmdError> {
+    /// Evicts until `extra` more bytes fit under `maxmemory`, or fails with `OOM` when
+    /// that is impossible. A request that could never fit is refused without evicting.
+    pub(crate) fn reclaim_memory(&self, extra: usize) -> Result<(), CmdError> {
         let limit = self.maxmemory.load(Ordering::Relaxed);
         if limit == 0 {
             return Ok(());
         }
+        if extra > limit {
+            return Err(CmdError::Oom);
+        }
         let policy = self.policy();
-        while self.db.used_memory() > limit {
+        while self.db.used_memory().saturating_add(extra) > limit {
             if !self.db.evict_one(policy, |key| self.log_del(key)) {
                 return Err(CmdError::Oom);
             }
@@ -241,7 +258,7 @@ impl Engine {
             return (e.into(), None);
         }
         if cmd.flags & DENYOOM != 0
-            && let Err(e) = self.reclaim_memory()
+            && let Err(e) = self.reclaim_memory(growth_estimate(args))
         {
             return (e.into(), None);
         }
@@ -268,8 +285,14 @@ impl Engine {
             self.unwatch(watched);
             return (e.into(), None);
         }
-        if commands.iter().any(|c| c.flags & DENYOOM != 0)
-            && let Err(e) = self.reclaim_memory()
+        let growth: usize = commands
+            .iter()
+            .zip(queue)
+            .filter(|(c, _)| c.flags & DENYOOM != 0)
+            .map(|(_, args)| growth_estimate(args))
+            .fold(0, usize::saturating_add);
+        if growth > 0
+            && let Err(e) = self.reclaim_memory(growth)
         {
             self.unwatch(watched);
             return (e.into(), None);
