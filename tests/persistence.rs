@@ -370,11 +370,19 @@ async fn rewrite_compacts_history() {
         c.read().await;
     }
     c.cmd(&["SET", "ttl", "v", "EX", "1000"]).await;
-    let before: u64 = info_field(&mut c, "persistence", "aof_current_size")
-        .await
-        .parse()
-        .unwrap();
-    assert!(before > 20_000);
+    // The writer thread drains asynchronously; wait for the 2000 INCRs to reach the file.
+    let mut before = 0;
+    for _ in 0..200 {
+        before = info_field(&mut c, "persistence", "aof_current_size")
+            .await
+            .parse::<u64>()
+            .unwrap();
+        if before > 20_000 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(before > 20_000, "AOF only reached {before} bytes");
     assert!(matches!(c.cmd(&["BGREWRITEAOF"]).await, Frame::Simple(_)));
     wait_for_rewrite(&mut c, 1).await;
     let after: u64 = info_field(&mut c, "persistence", "aof_current_size")
