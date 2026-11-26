@@ -44,8 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the image and run the crash-recovery smoke test
+        # The script generates a random password for the run; nothing is committed.
         run: |
-          docker compose build
-          docker compose up -d
           scripts/smoke.sh
-          docker compose down -v
+          FERRUM_REQUIREPASS=unused docker compose down -v

@@ -78,17 +78,27 @@ Source layout: `src/resp` (wire format), `src/db` (shards, values, skip list, ev
 cargo build --release
 ./target/release/ferrum-db --port 6380 --dir ./data --aof --aof-fsync everysec
 
-# in another terminal: any RESP client works; the one below is redis-cli from a container
-docker run --rm --network host redis:7-alpine redis-cli -p 6380 PING
+# in another terminal: any RESP client works, e.g. a locally installed redis-cli
+redis-cli -p 6380 PING
 ```
 
-Or with Docker (multi-stage, non-root, read-only root filesystem, data on a volume):
+The server binds to `127.0.0.1` by default. **It refuses to start on any non-loopback address
+without a password** (`--requirepass` / `FERRUM_REQUIREPASS`); the only way around that is the
+explicit `--unsafe-no-auth` (`FERRUM_ALLOW_NO_AUTH=1`), which logs a loud warning. An empty password
+counts as no password.
+
+Or with Docker (multi-stage, non-root, read-only root filesystem, data on a volume). The compose
+file requires a password and publishes the port on `127.0.0.1` only; generate one per run, never
+commit it:
 
 ```bash
+export FERRUM_REQUIREPASS=$(openssl rand -hex 16)
 docker build -t ferrum-db:local .
 docker compose up -d --no-build        # `docker compose up -d --build` also works where buildx exists
-scripts/smoke.sh                       # write, SIGKILL the container, restart it, verify the data
+docker run --rm --network ferrum-db_default redis:7-alpine redis-cli -h ferrum -p 6380 -a "$FERRUM_REQUIREPASS" PING
 docker compose down -v
+
+scripts/smoke.sh   # generates its own password, writes, SIGKILLs the container, restarts, verifies
 ```
 
 All flags can also be set through `FERRUM_*` environment variables (see `ferrum-db --help` and
@@ -161,7 +171,11 @@ reclaimed key is logged as `DEL`; replay then needs no clock at all.
 keys (from random shards), evicts the least recently used of them and repeats. Memory is an
 *estimate* maintained incrementally per value (no O(n) recount): at 950k small keys it reported
 321 MB against 491 MB of process RSS (1.5x), because allocator overhead and I/O buffers are not
-counted. Eviction runs before the write, so the dataset can overshoot the limit by one entry.
+counted. Before a write, the engine estimates its growth from the argument sizes (an upper bound for
+strings, lists, hashes, sets and sorted sets), evicts until that much fits and otherwise answers
+`OOM` without applying anything; `EXEC` does the same for the whole queue. A request larger than the
+limit is refused without evicting. Commands whose result is bigger than their arguments
+(`SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`) are not bounded and can still overshoot.
 
 **Zero-copy parsing, but detached storage.** The decoder returns bulk strings as slices of the
 socket buffer. Storing such a slice would keep the *whole* buffer alive for as long as one key
@@ -188,7 +202,7 @@ to answer `AUTH` when none is configured (instead of accepting anything).
 
 ## Testing strategy
 
-`cargo test` runs 148 tests; all pass (see the report below for the exact command output).
+`cargo test` runs tests; all pass (see the report below for the exact command output).
 
 | Layer | What it proves |
 |---|---|
@@ -263,7 +277,7 @@ Reproduce: `cargo bench --bench parser --bench store`, and start the server then
 - `SAVE` blocks the calling connection while the file is written; `BGSAVE` and `BGREWRITEAOF`
   pause all writers for the duration of an O(n) dump (measured above).
 - `EXEC` and a few global commands (`KEYS`, `FLUSHALL`, `RANDOMKEY`) lock every shard.
-- Memory accounting is an estimate; `maxmemory` can overshoot by one entry. Sorted-set and set
+- Memory accounting is an estimate; `maxmemory` is enforced against an argument-based growth estimate, so only the `S*STORE` commands can overshoot it. Set
   operations that combine several keys copy their inputs.
 - Inline commands do not support quoting. RESP3 big numbers and verbatim strings are not decoded.
 - Unix is the supported platform (signals); only macOS and Linux are exercised in CI.

@@ -43,6 +43,6 @@ ENV FERRUM_BIND=0.0.0.0 \
     FERRUM_DIR=/data \
     RUST_LOG=info
 HEALTHCHECK --interval=5s --timeout=3s --start-period=3s --retries=5 \
-    CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6380 && printf 'PING\\r\\n' >&3 && read -r reply <&3 && [[ $reply == +PONG* ]]"]
+    CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6380 && printf 'PING\\r\\n' >&3 && read -r reply <&3 && [[ $reply == +PONG* || $reply == -NOAUTH* ]]"]
 ENTRYPOINT ["ferrum-db"]
 CMD ["--aof", "--aof-fsync", "everysec"]

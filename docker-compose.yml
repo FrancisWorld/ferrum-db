@@ -5,7 +5,8 @@ services:
     container_name: ferrum-db
     command: ["--aof", "--aof-fsync", "${FERRUM_AOF_FSYNC:-everysec}", "--maxmemory", "${FERRUM_MAXMEMORY:-256mb}", "--maxmemory-policy", "allkeys-lru"]
     environment:
-      FERRUM_REQUIREPASS: ${FERRUM_REQUIREPASS:-}
+      # Required: the server refuses to listen on 0.0.0.0 without a password.
+      FERRUM_REQUIREPASS: ${FERRUM_REQUIREPASS:?set FERRUM_REQUIREPASS, e.g. export FERRUM_REQUIREPASS=$(openssl rand -hex 16)}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "127.0.0.1:${FERRUM_HOST_PORT:-6380}:6380"

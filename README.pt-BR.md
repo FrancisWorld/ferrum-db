@@ -79,17 +79,27 @@ recuperação), `src/pubsub.rs`, `src/server.rs`, `src/bin/ferrum-load.rs` (gera
 cargo build --release
 ./target/release/ferrum-db --port 6380 --dir ./data --aof --aof-fsync everysec
 
-# em outro terminal: qualquer cliente RESP serve; abaixo, o redis-cli de um contêiner
-docker run --rm --network host redis:7-alpine redis-cli -p 6380 PING
+# em outro terminal: qualquer cliente RESP serve, por exemplo um redis-cli instalado
+redis-cli -p 6380 PING
 ```
 
-Ou com Docker (multi-stage, usuário não root, sistema de arquivos raiz somente leitura, dados em volume):
+O servidor escuta em `127.0.0.1` por padrão. **Ele se recusa a iniciar em qualquer endereço que não
+seja loopback sem senha** (`--requirepass` / `FERRUM_REQUIREPASS`); a única saída é o explícito
+`--unsafe-no-auth` (`FERRUM_ALLOW_NO_AUTH=1`), que registra um aviso em destaque. Senha vazia conta
+como ausência de senha.
+
+Ou com Docker (multi-stage, usuário não root, sistema de arquivos raiz somente leitura, dados em
+volume). O compose exige uma senha e publica a porta apenas em `127.0.0.1`; gere uma a cada
+execução e nunca a versione:
 
 ```bash
+export FERRUM_REQUIREPASS=$(openssl rand -hex 16)
 docker build -t ferrum-db:local .
 docker compose up -d --no-build        # `docker compose up -d --build` também funciona onde há buildx
-scripts/smoke.sh                       # escreve, mata o contêiner com SIGKILL, reinicia e confere os dados
+docker run --rm --network ferrum-db_default redis:7-alpine redis-cli -h ferrum -p 6380 -a "$FERRUM_REQUIREPASS" PING
 docker compose down -v
+
+scripts/smoke.sh   # gera a própria senha, escreve, mata o contêiner com SIGKILL, reinicia e confere
 ```
 
 Todas as opções também podem vir de variáveis `FERRUM_*` (veja `ferrum-db --help` e
@@ -161,8 +171,11 @@ passada. Toda chave recolhida vai para o log como `DEL`; o replay não precisa d
 chaves (de shards aleatórios), remove a menos recentemente usada entre elas e repete. A memória é uma
 *estimativa* mantida incrementalmente por valor (sem recontagem O(n)): com 950 mil chaves pequenas
 ela indicou 321 MB contra 491 MB de RSS do processo (1,5x), porque a sobrecarga do alocador e os
-buffers de I/O não entram na conta. A remoção ocorre antes da escrita, então o dataset pode passar
-do limite em uma entrada.
+buffers de I/O não entram na conta. Antes de uma escrita, o engine estima o crescimento a partir do tamanho dos argumentos (um limite
+superior para strings, listas, hashes, sets e sorted sets), remove até caber e, se não der,
+responde `OOM` sem aplicar nada; o `EXEC` faz o mesmo para a fila inteira. Um pedido maior que o
+limite é recusado sem remover nada. Comandos cujo resultado é maior que os argumentos
+(`SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`) não têm esse limite e ainda podem ultrapassar.
 
 **Parsing sem cópia, mas armazenamento desacoplado.** O decoder devolve bulks como fatias do buffer
 do socket. Guardar uma fatia dessas manteria o buffer *inteiro* vivo enquanto uma única chave
@@ -190,7 +203,7 @@ recusa a responder ao `AUTH` quando não há senha configurada (em vez de aceita
 
 ## Estratégia de testes
 
-O `cargo test` executa 148 testes; todos passam (veja o relatório para a saída exata).
+O `cargo test` executa os testes; todos passam (veja o relatório para a saída exata).
 
 | Camada | O que prova |
 |---|---|
@@ -266,7 +279,7 @@ Para reproduzir: `cargo bench --bench parser --bench store` e, com o servidor li
 - O `SAVE` bloqueia a conexão que o chamou enquanto o arquivo é escrito; `BGSAVE` e `BGREWRITEAOF`
   pausam todos os escritores durante uma cópia O(n) (medida acima).
 - O `EXEC` e alguns comandos globais (`KEYS`, `FLUSHALL`, `RANDOMKEY`) travam todos os shards.
-- A contabilidade de memória é uma estimativa; o `maxmemory` pode ser ultrapassado em uma entrada.
+- A contabilidade de memória é uma estimativa; o `maxmemory` é aplicado sobre uma estimativa de crescimento baseada nos argumentos, então só os comandos `S*STORE` podem ultrapassá-lo.
   Operações entre várias chaves de sets copiam suas entradas.
 - Comandos inline não aceitam aspas. Big numbers e verbatim strings do RESP3 não são decodificados.
 - Unix é a plataforma suportada (sinais); apenas macOS e Linux são exercitados no CI.
