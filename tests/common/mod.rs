@@ -196,6 +196,18 @@ impl Client {
     }
 }
 
+/// Polls `condition` until it holds, panicking after `timeout` (for background work).
+pub async fn eventually(timeout: Duration, what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 pub fn bytes(s: &str) -> Bytes {
     Bytes::copy_from_slice(s.as_bytes())
 }

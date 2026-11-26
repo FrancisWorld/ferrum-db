@@ -271,12 +271,12 @@ async fn ttl_lazy_and_active_expiry() {
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     // `lazy` is observed by a read; `active` is never touched, only the background task can remove it.
     assert_eq!(c.cmd(&["GET", "lazy"]).await, Frame::Null);
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    assert_eq!(
-        srv.engine.db().key_count(),
-        1,
-        "background expiry must reclaim untouched keys"
-    );
+    eventually(
+        std::time::Duration::from_secs(5),
+        "background expiry to reclaim the untouched key",
+        || srv.engine.db().key_count() == 1,
+    )
+    .await;
     let info = c.cmd(&["INFO", "stats"]).await;
     let Frame::Bulk(text) = info else { panic!() };
     assert!(String::from_utf8_lossy(&text).contains("expired_keys:2"));

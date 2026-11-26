@@ -147,7 +147,18 @@ async fn expiry_running_alongside_writers_keeps_the_keyspace_consistent() {
     for t in tasks {
         t.await.unwrap();
     }
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let counters = srv.engine.db().counters();
+    eventually(
+        std::time::Duration::from_secs(10),
+        "all volatile keys to be reclaimed",
+        || {
+            counters
+                .volatile_keys
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+        },
+    )
+    .await;
     let mut c = srv.client().await;
     assert_eq!(
         c.cmd(&["DBSIZE"]).await,

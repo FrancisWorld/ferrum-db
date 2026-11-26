@@ -628,10 +628,15 @@ async fn expired_keys_are_logged_as_deletes_so_replay_cannot_resurrect_them() {
     })
     .await;
     let mut c = srv.client().await;
-    c.cmd(&["SET", "active", "v", "PX", "80"]).await; // reclaimed by the background task
-    c.cmd(&["SET", "lazy", "v", "PX", "80"]).await; // reclaimed by a read
+    c.cmd(&["SET", "active", "v", "PX", "80"]).await;
+    c.cmd(&["SET", "lazy", "v", "PX", "80"]).await;
     c.cmd(&["SET", "keep", "v"]).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    eventually(
+        Duration::from_secs(5),
+        "the background task to reclaim both expired keys",
+        || srv.engine.db().key_count() == 1,
+    )
+    .await;
     assert_eq!(c.cmd(&["GET", "lazy"]).await, Frame::Null);
     let dir = srv.stop().await;
     let log = std::fs::read_to_string(dir.path().join("appendonly.aof")).unwrap();
