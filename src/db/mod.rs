@@ -145,6 +145,16 @@ impl Db {
         Locked { db: self, guards }
     }
 
+    /// Loads entries produced by a snapshot (no expiry check; TTLs apply lazily afterwards).
+    pub fn restore(&self, entries: Vec<DumpEntry>) {
+        for e in entries {
+            let mut locked = self.lock_keys([e.key.as_ref()]);
+            locked
+                .shard(&e.key)
+                .insert(e.key.clone(), e.value, e.expire_at, 0);
+        }
+    }
+
     /// Approximate bytes currently in use.
     pub fn used_memory(&self) -> usize {
         self.counters.used_memory.load(Ordering::Relaxed)

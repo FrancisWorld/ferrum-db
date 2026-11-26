@@ -187,8 +187,8 @@ impl SkipList {
                 span: (rank[0] - rank[i]) + 1,
             };
         }
-        for i in lvl..self.level {
-            self.nodes[update[i]].links[i].span += 1;
+        for (i, &u) in update.iter().enumerate().take(self.level).skip(lvl) {
+            self.nodes[u].links[i].span += 1;
         }
         self.nodes[idx].backward = if update[0] == HEADER { NIL } else { update[0] };
         let next = self.nodes[idx].links[0].forward;
@@ -225,8 +225,7 @@ impl SkipList {
         {
             return false;
         }
-        for i in 0..self.level {
-            let u = update[i];
+        for (i, &u) in update.iter().enumerate().take(self.level) {
             if self.nodes[u].links[i].forward == target {
                 let t = self.nodes[target].links[i];
                 self.nodes[u].links[i].span = self.nodes[u].links[i].span + t.span - 1;

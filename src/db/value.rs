@@ -59,7 +59,7 @@ impl Value {
             Value::List(l) => l.items.is_empty(),
             Value::Hash(h) => h.map.is_empty(),
             Value::Set(s) => s.set.is_empty(),
-            Value::ZSet(z) => z.len() == 0,
+            Value::ZSet(z) => z.is_empty(),
         }
     }
 }
