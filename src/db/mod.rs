@@ -18,8 +18,10 @@ use parking_lot::{Mutex, MutexGuard};
 
 use crate::clock::Clock;
 
-pub use shard::{Counters, Entry, Shard};
-pub use value::{ELEM_OVERHEAD, ENTRY_OVERHEAD, HashVal, ListVal, SetVal, Value};
+pub use shard::{Counters, ENTRY_OVERHEAD, Entry, Shard};
+pub use value::{
+    ELEM_OVERHEAD, HASH_FIELD_OVERHEAD, HashVal, ListVal, SetVal, Value, ZSET_MEMBER_OVERHEAD,
+};
 pub use zset::{Inserted, ScoreRange, ZSet};
 
 /// Which keys `maxmemory` eviction may remove.

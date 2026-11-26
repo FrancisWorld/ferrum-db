@@ -4,9 +4,8 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,60 +19,6 @@ use ferrum_db::resp::Frame;
 use ferrum_db::{Config, Engine};
 
 // ---- helpers ----------------------------------------------------------------
-
-struct Proc {
-    child: Child,
-    addr: SocketAddr,
-}
-
-impl Proc {
-    fn spawn(dir: &Path, extra: &[&str]) -> Proc {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let child = Command::new(env!("CARGO_BIN_EXE_ferrum-db"))
-            .args(["--port", &port.to_string(), "--dir"])
-            .arg(dir)
-            .args(extra)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn ferrum-db");
-        Proc {
-            child,
-            addr: SocketAddr::from(([127, 0, 0, 1], port)),
-        }
-    }
-
-    async fn ready(&mut self) -> Client {
-        for _ in 0..200 {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                panic!("server exited early: {status}");
-            }
-            if let Ok(stream) = tokio::net::TcpStream::connect(self.addr).await {
-                drop(stream);
-                return Client::connect(self.addr).await;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("server did not become ready");
-    }
-
-    /// SIGKILL: no destructors, no flush, exactly like a crash.
-    fn crash(mut self) {
-        self.child.kill().unwrap();
-        self.child.wait().unwrap();
-    }
-}
-
-impl Drop for Proc {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 fn aof_config(dir: &Path, fsync: FsyncPolicy) -> Config {
     Config {

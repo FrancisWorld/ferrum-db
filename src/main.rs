@@ -102,7 +102,8 @@ async fn main() -> ExitCode {
         aof_fsync: args.aof_fsync,
         maxmemory: args.maxmemory,
         maxmemory_policy: args.maxmemory_policy,
-        requirepass: args.requirepass,
+        // An empty variable (as docker-compose passes for an unset value) means "no password".
+        requirepass: args.requirepass.filter(|p| !p.is_empty()),
         max_clients: args.max_clients,
         pubsub_buffer_limit: args.pubsub_buffer_limit,
         ..Config::default()

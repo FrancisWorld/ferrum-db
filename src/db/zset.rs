@@ -10,7 +10,7 @@ use ahash::RandomState;
 use bytes::Bytes;
 use std::collections::HashMap;
 
-use super::value::ELEM_OVERHEAD;
+use super::value::ZSET_MEMBER_OVERHEAD;
 
 const MAX_LEVEL: usize = 32;
 const NIL: usize = usize::MAX;
@@ -397,6 +397,7 @@ impl ZSet {
     /// Adds `member` or moves it to `score`. `score` must not be NaN.
     pub fn insert(&mut self, member: Bytes, score: f64) -> Inserted {
         debug_assert!(!score.is_nan());
+        let member = super::value::detach(&member);
         let score = if score == 0.0 { 0.0 } else { score };
         match self.dict.get(&member).copied() {
             Some(old) if old == score => Inserted::Unchanged,
@@ -407,7 +408,7 @@ impl ZSet {
                 Inserted::Updated
             }
             None => {
-                self.bytes += member.len() + 8 + 2 * ELEM_OVERHEAD;
+                self.bytes += member.len() + ZSET_MEMBER_OVERHEAD;
                 self.list.insert(score, member.clone());
                 self.dict.insert(member, score);
                 Inserted::Added
@@ -420,7 +421,7 @@ impl ZSet {
         match self.dict.remove_entry(member) {
             Some((m, score)) => {
                 self.list.delete(score, &m);
-                self.bytes -= m.len() + 8 + 2 * ELEM_OVERHEAD;
+                self.bytes -= m.len() + ZSET_MEMBER_OVERHEAD;
                 true
             }
             None => false,

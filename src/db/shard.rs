@@ -12,7 +12,7 @@ use ahash::RandomState;
 use bytes::Bytes;
 use indexmap::IndexMap;
 
-use super::value::{ENTRY_OVERHEAD, Value};
+use super::value::{Value, detach};
 
 /// Process-wide counters shared by all shards.
 #[derive(Debug, Default)]
@@ -52,6 +52,11 @@ pub struct Entry {
     pub last_access: u64,
     mem: usize,
 }
+
+/// Fixed per-key cost: the entry, the key handle, the table bucket (hash plus index
+/// slot) and two allocator headers (key and string payload).
+pub const ENTRY_OVERHEAD: usize =
+    std::mem::size_of::<Entry>() + std::mem::size_of::<Bytes>() + 16 + 32;
 
 #[derive(Debug, Default)]
 struct WatchSlot {
@@ -121,7 +126,11 @@ impl Shard {
     }
 
     /// Inserts or replaces `key`, replacing any previous TTL with `expire_at`.
-    pub fn insert(&mut self, key: Bytes, value: Value, expire_at: Option<u64>, now: u64) {
+    pub fn insert(&mut self, key: Bytes, mut value: Value, expire_at: Option<u64>, now: u64) {
+        let key = detach(&key);
+        if let Value::Str(b) = &mut value {
+            *b = detach(b);
+        }
         let mem = ENTRY_OVERHEAD + key.len() + value.mem_size();
         self.touch(&key);
         let entry = Entry {
@@ -338,6 +347,22 @@ mod tests {
     fn shard() -> (Shard, Arc<Counters>) {
         let c = Arc::new(Counters::default());
         (Shard::new(c.clone()), c)
+    }
+
+    #[test]
+    fn keys_and_string_values_are_detached_from_the_read_buffer() {
+        let (mut s, _) = shard();
+        let big = Bytes::from(vec![b'x'; 64 * 1024]);
+        let (key, val) = (big.slice(10..14), big.slice(20..40));
+        s.insert(key.clone(), Value::Str(val.clone()), None, 0);
+        let (stored_key, entry) = s.iter().next().unwrap();
+        let Value::Str(stored_val) = &entry.value else {
+            panic!()
+        };
+        assert_ne!(stored_key.as_ptr(), key.as_ptr());
+        assert_ne!(stored_val.as_ptr(), val.as_ptr());
+        assert_eq!(stored_key, &key);
+        assert_eq!(stored_val, &val);
     }
 
     #[test]

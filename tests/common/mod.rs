@@ -2,6 +2,8 @@
 #![allow(dead_code, missing_docs)]
 
 use std::net::SocketAddr;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -196,4 +198,84 @@ impl Client {
 
 pub fn bytes(s: &str) -> Bytes {
     Bytes::copy_from_slice(s.as_bytes())
+}
+
+/// A real `ferrum-db` process, for tests that must survive or cause a crash.
+pub struct Proc {
+    child: Child,
+    pub addr: SocketAddr,
+}
+
+impl Proc {
+    pub fn spawn(dir: &Path, extra: &[&str]) -> Proc {
+        Self::spawn_env(dir, extra, &[])
+    }
+
+    pub fn spawn_env(dir: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Proc {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = Command::new(env!("CARGO_BIN_EXE_ferrum-db"))
+            .args(["--port", &port.to_string(), "--dir"])
+            .arg(dir)
+            .args(extra)
+            .envs(envs.iter().copied())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ferrum-db");
+        Proc {
+            child,
+            addr: SocketAddr::from(([127, 0, 0, 1], port)),
+        }
+    }
+
+    pub async fn ready(&mut self) -> Client {
+        for _ in 0..200 {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                panic!("server exited early: {status}");
+            }
+            if let Ok(stream) = tokio::net::TcpStream::connect(self.addr).await {
+                drop(stream);
+                return Client::connect(self.addr).await;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("server did not become ready");
+    }
+
+    /// Sends SIGTERM through the `kill` utility (the exact child PID only).
+    pub fn terminate(&self) {
+        let status = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// Waits for the child to exit by itself.
+    pub async fn wait_exit(&mut self) -> std::process::ExitStatus {
+        for _ in 0..400 {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("server did not exit");
+    }
+
+    /// SIGKILL: no destructors, no flush, exactly like a crash.
+    pub fn crash(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+impl Drop for Proc {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }

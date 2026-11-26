@@ -9,10 +9,23 @@ use indexmap::{IndexMap, IndexSet};
 
 use super::zset::ZSet;
 
-/// Fixed per-key bookkeeping estimate (hash slot, entry header, expiry index).
-pub const ENTRY_OVERHEAD: usize = 96;
-/// Fixed per-element estimate for collection members.
-pub const ELEM_OVERHEAD: usize = 40;
+/// Per-element estimate for list and set members: a 32-byte `Bytes` handle plus an
+/// allocator header.
+pub const ELEM_OVERHEAD: usize = 48;
+/// Per-field estimate for hashes: two `Bytes` handles, a table bucket and two allocator headers.
+pub const HASH_FIELD_OVERHEAD: usize = 112;
+/// Per-member estimate for sorted sets: the dictionary entry plus a skip-list node and its links.
+pub const ZSET_MEMBER_OVERHEAD: usize = 160;
+
+/// Copies a payload into its own allocation.
+///
+/// The decoder hands out zero-copy slices of the socket read buffer. Keeping such a
+/// slice in the keyspace would pin the whole buffer (many commands' worth of
+/// unrelated bytes) for as long as the value lives, multiplying resident memory.
+/// Everything that is stored goes through this function first.
+pub(crate) fn detach(b: &Bytes) -> Bytes {
+    Bytes::copy_from_slice(b)
+}
 
 /// A stored value.
 #[derive(Debug, Clone)]
@@ -89,12 +102,14 @@ impl ListVal {
 
     /// Prepends an element.
     pub fn push_front(&mut self, b: Bytes) {
+        let b = detach(&b);
         self.bytes += b.len() + ELEM_OVERHEAD;
         self.items.push_front(b);
     }
 
     /// Appends an element.
     pub fn push_back(&mut self, b: Bytes) {
+        let b = detach(&b);
         self.bytes += b.len() + ELEM_OVERHEAD;
         self.items.push_back(b);
     }
@@ -118,6 +133,7 @@ impl ListVal {
         let Some(slot) = self.items.get_mut(idx) else {
             return false;
         };
+        let b = detach(&b);
         self.bytes = self.bytes - slot.len() + b.len();
         *slot = b;
         true
@@ -197,6 +213,7 @@ impl HashVal {
 
     /// Sets a field; returns true when the field is new.
     pub fn insert(&mut self, field: Bytes, value: Bytes) -> bool {
+        let (field, value) = (detach(&field), detach(&value));
         let (flen, vlen) = (field.len(), value.len());
         match self.map.insert(field, value) {
             Some(old) => {
@@ -204,7 +221,7 @@ impl HashVal {
                 false
             }
             None => {
-                self.bytes += flen + vlen + ELEM_OVERHEAD;
+                self.bytes += flen + vlen + HASH_FIELD_OVERHEAD;
                 true
             }
         }
@@ -214,7 +231,7 @@ impl HashVal {
     pub fn remove(&mut self, field: &[u8]) -> bool {
         match self.map.swap_remove_entry(field) {
             Some((k, v)) => {
-                self.bytes -= k.len() + v.len() + ELEM_OVERHEAD;
+                self.bytes -= k.len() + v.len() + HASH_FIELD_OVERHEAD;
                 true
             }
             None => false,
@@ -257,6 +274,7 @@ impl SetVal {
 
     /// Adds a member; returns true when it is new.
     pub fn insert(&mut self, m: Bytes) -> bool {
+        let m = detach(&m);
         let len = m.len();
         let added = self.set.insert(m);
         if added {
@@ -324,11 +342,34 @@ mod tests {
     }
 
     #[test]
+    fn stored_payloads_never_alias_the_read_buffer() {
+        // A decoder-style zero-copy slice of a large buffer must not be retained as is.
+        let big = Bytes::from(vec![b'x'; 64 * 1024]);
+        let slice = big.slice(100..110);
+        let aliases = |stored: &Bytes| {
+            let (lo, hi) = (big.as_ptr() as usize, big.as_ptr() as usize + big.len());
+            (lo..hi).contains(&(stored.as_ptr() as usize))
+        };
+        let mut l = ListVal::default();
+        l.push_back(slice.clone());
+        assert!(!aliases(l.items().front().unwrap()));
+        let mut h = HashVal::default();
+        h.insert(slice.clone(), slice.clone());
+        assert!(h.iter().all(|(k, v)| !aliases(k) && !aliases(v)));
+        let mut s = SetVal::default();
+        s.insert(slice.clone());
+        assert!(s.iter().all(|m| !aliases(m)));
+        let mut z = ZSet::new();
+        z.insert(slice.clone(), 1.0);
+        assert!(z.iter().all(|(m, _)| !aliases(m)));
+    }
+
+    #[test]
     fn hash_and_set_tracking() {
         let mut h = HashVal::default();
         assert!(h.insert(b("f"), b("v")));
         assert!(!h.insert(b("f"), b("vvvv")));
-        assert_eq!(h.bytes, 1 + 4 + ELEM_OVERHEAD);
+        assert_eq!(h.bytes, 1 + 4 + HASH_FIELD_OVERHEAD);
         assert!(h.remove(b"f"));
         assert!(!h.remove(b"f"));
         assert_eq!(h.bytes, 0);
