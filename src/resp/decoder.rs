@@ -211,7 +211,8 @@ impl Decoder {
                     let len = self.checked_len(len, "bulk", self.limits.max_bulk_len)?;
                     self.pending_bulk = Some(len);
                     buf.advance(line_end + 1);
-                    buf.reserve(len + 2);
+                    // No `reserve(len)`: the declared length is attacker-controlled, so the
+                    // buffer must only grow as bytes actually arrive.
                     return Ok(Step::Opened);
                 }
             }
@@ -496,6 +497,27 @@ mod tests {
             ProtocolError::TooDeep
         );
         assert_eq!(run(&[b'x'; 40]).unwrap_err(), ProtocolError::LineTooLong);
+    }
+
+    #[test]
+    fn declared_bulk_length_does_not_reserve_capacity() {
+        // 512 MiB declared, a few bytes delivered, then the peer stalls.
+        let mut dec = Decoder::new(Limits {
+            max_bulk_len: 512 << 20,
+            ..Limits::default()
+        });
+        let mut buf = BytesMut::with_capacity(64);
+        buf.extend_from_slice(b"$536870912\r\nabc");
+        assert_eq!(dec.decode(&mut buf).unwrap(), None);
+        assert!(
+            buf.capacity() < 1 << 20,
+            "capacity {} tracks the declared length",
+            buf.capacity()
+        );
+        // More data arrives: capacity follows the bytes received, not the declaration.
+        buf.extend_from_slice(&[b'x'; 4096]);
+        assert_eq!(dec.decode(&mut buf).unwrap(), None);
+        assert!(buf.capacity() < 1 << 20);
     }
 
     #[test]

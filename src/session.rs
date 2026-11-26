@@ -14,6 +14,24 @@ use crate::error::CmdError;
 use crate::pubsub::{Push, Subscriber};
 use crate::resp::{Frame, Protocol, encode};
 
+/// Commands handled by the session itself instead of the command table.
+pub const SESSION_COMMANDS: &[&str] = &[
+    "AUTH",
+    "HELLO",
+    "QUIT",
+    "RESET",
+    "CLIENT",
+    "MULTI",
+    "DISCARD",
+    "EXEC",
+    "WATCH",
+    "UNWATCH",
+    "SUBSCRIBE",
+    "PSUBSCRIBE",
+    "UNSUBSCRIBE",
+    "PUNSUBSCRIBE",
+];
+
 /// Maximum commands queued between `MULTI` and `EXEC`.
 const MAX_QUEUED: usize = 100_000;
 
@@ -342,6 +360,9 @@ impl Session {
     }
 
     fn client(&mut self, args: &[Bytes], out: &mut Output) {
+        if args.len() < 2 {
+            return self.error(CmdError::Arity("client".into()), out);
+        }
         let sub = args[1].to_ascii_uppercase();
         match (sub.as_slice(), args.len()) {
             (b"ID", 2) => self.reply(&Frame::Integer(self.id as i64), out),

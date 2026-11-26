@@ -178,6 +178,13 @@ fn registry() -> &'static HashMap<&'static str, &'static Command> {
     })
 }
 
+/// Names of every command in the table (connection-level commands live in `session`).
+pub fn command_names() -> Vec<&'static str> {
+    let mut names: Vec<_> = registry().keys().copied().collect();
+    names.sort_unstable();
+    names
+}
+
 /// Looks a command up by case-insensitive name.
 pub fn lookup(name: &[u8]) -> Option<&'static Command> {
     let mut buf = [0u8; 24];

@@ -98,11 +98,21 @@ impl Server {
         stats.connections.fetch_add(1, Ordering::Relaxed);
         let (engine, stop) = (self.engine.clone(), stop.clone());
         connections.spawn(async move {
+            // Dropped on every exit path, including a panic unwinding through the task.
+            let _slot = ClientSlot(engine.clone());
             tracing::debug!(%peer, "client connected");
             serve_connection(stream, &engine, stop).await;
-            engine.stats().clients.fetch_sub(1, Ordering::Relaxed);
             tracing::debug!(%peer, "client disconnected");
         });
+    }
+}
+
+/// Releases one `max_clients` slot when dropped.
+struct ClientSlot(Arc<Engine>);
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        self.0.stats().clients.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -164,6 +174,11 @@ async fn serve_connection(stream: TcpStream, engine: &Engine, mut stop: watch::R
             }
             read = reader.read_buf(&mut inbuf) => match read {
                 Ok(0) | Err(_) => Flow::Close,
+                Ok(_) if inbuf.len() > engine.config().max_query_buffer => {
+                    tracing::warn!(buffered = inbuf.len(), "query buffer limit exceeded; closing connection");
+                    let _ = writer.write_all(b"-ERR Protocol error: query buffer limit exceeded\r\n").await;
+                    Flow::Close
+                }
                 Ok(_) => process(engine, &mut session, &mut decoder, &mut inbuf, &mut writer, &subscriber).await,
             },
         };
@@ -268,5 +283,33 @@ async fn flush(
     tokio::select! {
         result = writer.write_all(&data) => result.map_err(|_| ()),
         () = subscriber.kicked() => Err(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::ClientSlot;
+    use crate::clock::SystemClock;
+    use crate::{Config, Engine};
+
+    #[test]
+    fn a_panicking_connection_still_releases_its_client_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let engine = Engine::open(config, Arc::new(SystemClock)).unwrap();
+        engine.stats().clients.store(1, Ordering::Relaxed);
+        let e = engine.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _slot = ClientSlot(e);
+            panic!("simulated handler bug");
+        }));
+        assert!(result.is_err());
+        assert_eq!(engine.stats().clients.load(Ordering::Relaxed), 0);
     }
 }
